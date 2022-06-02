@@ -16,7 +16,8 @@ sys.path.append(os.path.join(os.getcwd())) # HACK add the root folder
 from lib.config import CONF
 from lib.projection import ProjectionHelper
 
-SCANNET_LIST = CONF.SCANNETV2_LIST
+# SCANNET_LIST = CONF.SCANNETV2_LIST
+SCANNET_LIST = CONF.SCANNETV2_TRAIN
 SCANNET_DATA = CONF.PATH.SCANNET_DATA
 SCANNET_FRAME_ROOT = CONF.SCANNET_FRAMES
 SCANNET_FRAME_PATH = os.path.join(SCANNET_FRAME_ROOT, "{}") # name of the file

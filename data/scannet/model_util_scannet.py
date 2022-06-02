@@ -5,9 +5,11 @@ Modified from: https://github.com/facebookresearch/votenet/blob/master/scannet/m
 import numpy as np
 import sys
 import os
+import torch
 
 sys.path.append(os.path.join(os.getcwd(), os.pardir, "lib")) # HACK add the lib folder
 from lib.config import CONF
+from utils.box_util import get_3d_box
 from utils.box_util import get_3d_box
 
 def in_hull(p, hull):
@@ -77,6 +79,8 @@ def rotate_aligned_boxes_along_axis(input_boxes, rot_mat, axis):
         new_lengths = np.stack((new_d1, new_d2, lengths[:,2]), axis=1)
                   
     return np.concatenate([new_centers, new_lengths], axis=1)
+
+    
 
 class ScannetDatasetConfig(object):
     def __init__(self):
@@ -170,3 +174,13 @@ class ScannetDatasetConfig(object):
         obb[:, 3:6] = box_size
         obb[:, 6] = heading_angle*-1
         return obb
+
+        # aus scannet.py 3detr
+    def class2anglebatch_tensor(self, pred_cls, residual, to_label_format=True):
+        zero_angle = torch.zeros(
+            (pred_cls.shape[0], pred_cls.shape[1]),
+            dtype=torch.float32,
+            device=pred_cls.device,
+        )
+        return zero_angle
+    

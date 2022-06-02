@@ -49,7 +49,7 @@ def get_dataloader(args, scanrefer, all_scene_list, split, config, augment, scan
         scan2cad_rotation=scan2cad_rotation
     )
     # dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=1)
 
     return dataset, dataloader
 
@@ -129,6 +129,7 @@ def get_num_params(model):
     return num_params
 
 def get_solver(args, dataset, dataloader):
+    print(f'Cuda available: {torch.cuda.is_available()}')
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = get_model(args, dataset["train"], device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)

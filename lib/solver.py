@@ -163,7 +163,7 @@ class Solver():
             BN_MOMENTUM_INIT = 0.5
             BN_MOMENTUM_MAX = 0.001
             bn_lbmd = lambda it: max(BN_MOMENTUM_INIT * bn_decay_rate**(int(it / bn_decay_step)), BN_MOMENTUM_MAX)
-            self.bn_scheduler = BNMomentumScheduler(model, bn_lambda=bn_lbmd, last_epoch=start_epoch-1)
+            self.bn_scheduler = BNMomentumScheduler(model, bn_lambda=bn_lbmd, last_epoch=start_epoch-1) # not model specific
         else:
             self.bn_scheduler = None
 
@@ -179,7 +179,7 @@ class Solver():
             try:
                 self._log("epoch {} starting...".format(epoch_id + 1))
 
-                # feed 
+                # feed
                 self._feed(self.dataloader["train"], "train", epoch_id)
 
                 # save model

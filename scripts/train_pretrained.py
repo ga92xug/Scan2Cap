@@ -39,6 +39,8 @@ def get_dataloader(args, scanrefer, all_scene_list, split, augment, scan2cad_rot
         from lib.dataset_pretrained import PretrainedGTDataset as PretrainedDataset
     elif args.mode == "votenet":
         from lib.dataset_pretrained import PretrainedVoteNetDataset as PretrainedDataset
+    elif args.mode == "3detr":
+        from lib.dataset_pretrained import Pretrained3detrDataset as PretrainedDataset
     else:
         raise ValueError("invalid pretrained mode, choices: [gt, votenet]")
 
@@ -201,7 +203,8 @@ def train(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", type=str, help="tag for the training, e.g. cuda_wl", default="")
-    parser.add_argument("--mode", type=str, help="Mode for pretrained pipeline, choice: [gt, votenet]", required=True)
+    # parser.add_argument("--mode", type=str, help="Mode for pretrained pipeline, choice: [gt, votenet]", required=True)
+    parser.add_argument("--mode", type=str, help="Mode for pretrained pipeline, choice: [gt, votenet, 3detr]", required=True)
     parser.add_argument("--gpu", type=str, help="gpu", default="0")
     parser.add_argument("--batch_size", type=int, help="batch size", default=16)
     parser.add_argument("--epoch", type=int, help="number of epochs", default=50)

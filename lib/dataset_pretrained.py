@@ -19,12 +19,15 @@ from torch.utils.data import Dataset
 
 sys.path.append(os.path.join(os.getcwd(), "lib")) # HACK add the lib folder
 from lib.config import CONF
-from utils.pc_utils import random_sampling, rotx, roty, rotz
+from utils.pc_utils import random_sampling, rotx, roty, rotz, shift_scale_points, scale_points
 from utils.box_util import get_3d_box, get_3d_box_batch
+from utils.box_util import get_3d_box, get_3d_box_batch, get_3d_box_batch_tensor
 from data.scannet.model_util_scannet import rotate_aligned_boxes, ScannetDatasetConfig, rotate_aligned_boxes_along_axis
+from utils.random_cuboid import RandomCuboid
+
 
 # data setting
-DC = ScannetDatasetConfig()
+DC = ScannetDatasetConfig() # checked this same functions are implemented
 MAX_NUM_OBJ = 128
 MEAN_COLOR_RGB = np.array([109.8, 97.2, 83.8])
 OBJ_CLASS_IDS = np.array([3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]) # exclude wall (1), floor (2), ceiling (22)
@@ -281,6 +284,19 @@ class ReferenceDataset(Dataset):
         bbox[:, :3] += factor
 
         return point_set, bbox
+
+    # from 3detr 
+    def box_parametrization_to_corners(self, box_center_unnorm, box_size, box_angle):
+        # box_center_upright = flip_axis_to_camera_tensor(box_center_unnorm)
+        # boxes = get_3d_box_batch_tensor(box_size, box_angle, box_center_upright)
+        boxes = get_3d_box_batch_tensor(box_size, box_angle, box_center_unnorm)
+        return boxes
+
+    def box_parametrization_to_corners_np(self, box_center_unnorm, box_size, box_angle):
+        # box_center_upright = flip_axis_to_camera_np(box_center_unnorm)
+        # boxes = get_3d_box_batch_np(box_size, box_angle, box_center_upright)
+        boxes = get_3d_box_batch(box_size, box_angle, box_center_unnorm)
+        return boxes
 
 class PretrainedGTDataset(ReferenceDataset):
        
@@ -1049,3 +1065,319 @@ class PretrainedVoteNetDataset(ReferenceDataset):
                 object_id_to_sem_cls[scene_id][object_id] = sem_cls # int to int
 
         return object_id_to_sem_cls
+
+
+# PRETRAIN_3DETR
+class Pretrained3detrDataset(ReferenceDataset):
+    def __init__(
+        self,
+        # my stuff added
+        scanrefer,
+        scanrefer_all_scene,
+        name="ScanRefer",
+        split="train",
+        num_points=40000,
+        use_height=False, 
+        use_color=False, 
+        use_normal=False, 
+        use_multiview=False, 
+        augment=False,
+        debug=False,
+        scan2cad_rotation=None,
+        # end
+        # split="train",
+        root_dir=None,
+        meta_data_dir=None,
+        # num_points=40000,
+        # use_color=False,
+        # use_height=False,
+        # augment=False,
+        use_random_cuboid=True,
+        random_cuboid_min_points=30000,
+    ):
+
+        # my
+        self.scanrefer = scanrefer
+        self.scanrefer_all_scene = scanrefer_all_scene # all scene_ids in scanrefer
+        self.split = split
+        self.name = name
+        self.num_points = num_points
+        self.use_color = use_color        
+        self.use_height = use_height
+        self.use_normal = use_normal        
+        self.use_multiview = use_multiview
+        self.augment = augment
+        self.debug = debug
+        self.scan2cad_rotation = scan2cad_rotation
+
+        # load data
+        # self._load_data(name)
+        self._load_data()
+        self.multiview_data = {}
+        self.gt_feature_data = {}
+
+        # fliter
+        self.scene_objects = self._get_scene_objects(self.scanrefer)
+
+        # need that probably 
+        IGNORE_LABEL = -100
+        # end
+
+        # I think we could get rid of this
+        # self.dataset_config = DC
+        # assert split in ["train", "val"]
+        # if root_dir is None:
+        #     root_dir = DATASET_ROOT_DIR
+# 
+        # if meta_data_dir is None:
+        #     meta_data_dir = DATASET_METADATA_DIR
+# 
+        # self.data_path = root_dir
+        # all_scan_names = list(
+        #     set(
+        #         [
+        #             os.path.basename(x)[0:12]
+        #             for x in os.listdir(self.data_path)
+        #             if x.startswith("scene")
+        #         ]
+        #     )
+        # )
+        # if split == "all":
+        #     self.scan_names = all_scan_names
+        # elif split in ["train", "val", "test"]:
+        #     split_filenames = os.path.join(meta_data_dir, f"scannetv2_{split}.txt")
+        #     with open(split_filenames, "r") as f:
+        #         self.scan_names = f.read().splitlines()
+        #     # remove unavailiable scans
+        #     num_scans = len(self.scan_names)
+        #     self.scan_names = [
+        #         sname for sname in self.scan_names if sname in all_scan_names
+        #     ]
+        #     print(f"kept {len(self.scan_names)} scans out of {num_scans}")
+        # else:
+        #     raise ValueError(f"Unknown split name {split}")
+        # # unitl here
+
+        # self.num_points = num_points
+        # self.use_color = use_color
+        # self.use_height = use_height
+        # self.augment = augment
+        # I think these are also not needed since we freeze the weights of 3detr
+        self.use_random_cuboid = use_random_cuboid
+        self.random_cuboid_augmentor = RandomCuboid(min_points=random_cuboid_min_points)
+        self.center_normalizing_range = [
+            np.zeros((1, 3), dtype=np.float32),
+            np.ones((1, 3), dtype=np.float32),
+        ]
+
+    def __len__(self):
+        # return len(self.scan_names)
+        return len(self.scanrefer)
+
+    def __getitem__(self, idx):
+        # my
+        start = time.time()
+        scene_id = self.scanrefer[idx]["scene_id"]
+        object_id = int(self.scanrefer[idx]["object_id"])
+        object_name = " ".join(self.scanrefer[idx]["object_name"].split("_"))
+        ann_id = self.scanrefer[idx]["ann_id"]
+
+        annotated = 1
+
+        object_cat = self.raw2label[object_name] if object_name in self.raw2label else 17
+
+        # get language features
+        # not for 3detr but maybe necessary rest of pipeline
+        lang_feat = self.lang[scene_id][str(object_id)][ann_id]
+        lang_len = len(self.scanrefer[idx]["token"]) + 2
+        lang_len = lang_len if lang_len <= CONF.TRAIN.MAX_DES_LEN + 2 else CONF.TRAIN.MAX_DES_LEN + 2
+
+        lang_ids = self.lang_ids[scene_id][str(object_id)][ann_id]
+
+        unique_multiple_flag = self.unique_multiple_lookup[scene_id][str(object_id)][ann_id]
+        
+        # get pc
+        mesh_vertices = self.scene_data[scene_id]["mesh_vertices"]
+        instance_labels = self.scene_data[scene_id]["instance_labels"]
+        semantic_labels = self.scene_data[scene_id]["semantic_labels"]
+        instance_bboxes = self.scene_data[scene_id]["instance_bboxes"]
+        # end
+
+        # scan_name = self.scan_names[idx]
+        
+        #mesh_vertices = np.load(os.path.join(self.data_path, scan_name) + "_vert.npy")
+        #mesh_vertices = np.load(os.path.join(self.data_path, scan_name) + "_aligned_vert.npy")
+        
+       
+        
+        # instance_labels = np.load(
+        #     os.path.join(self.data_path, scan_name) + "_ins_label.npy"
+        # )        
+        # semantic_labels = np.load(
+        #     os.path.join(self.data_path, scan_name) + "_sem_label.npy"
+        # )
+        
+        # instance_bboxes = np.load(os.path.join(self.data_path, scan_name) + "_bbox.npy")
+        # instance_bboxes = np.load(os.path.join(self.data_path, scan_name) +"_aligned_bbox.npy")
+
+        if not self.use_color:
+            point_cloud = mesh_vertices[:, 0:3]  # do not use color for now
+            pcl_color = mesh_vertices[:, 3:6]
+        else:
+            point_cloud = mesh_vertices[:, 0:6]
+            point_cloud[:, 3:] = (point_cloud[:, 3:] - MEAN_COLOR_RGB) / 256.0
+            pcl_color = point_cloud[:, 3:]
+
+        if self.use_height:
+            floor_height = np.percentile(point_cloud[:, 2], 0.99)
+            height = point_cloud[:, 2] - floor_height
+            point_cloud = np.concatenate([point_cloud, np.expand_dims(height, 1)], 1)
+
+        if self.use_multiview:
+            assert(False)
+
+        # ------------------------------- LABELS ------------------------------
+        # don't need that since already declared
+        # MAX_NUM_OBJ = self.dataset_config.max_num_obj
+        target_bboxes = np.zeros((MAX_NUM_OBJ, 6), dtype=np.float32)
+        target_bboxes_mask = np.zeros((MAX_NUM_OBJ), dtype=np.float32)
+        angle_classes = np.zeros((MAX_NUM_OBJ,), dtype=np.int64)
+        angle_residuals = np.zeros((MAX_NUM_OBJ,), dtype=np.float32)
+        raw_sizes = np.zeros((MAX_NUM_OBJ, 3), dtype=np.float32)
+        raw_angles = np.zeros((MAX_NUM_OBJ,), dtype=np.float32)
+
+        if self.augment and self.use_random_cuboid:
+            (
+                point_cloud,
+                instance_bboxes,
+                per_point_labels,
+            ) = self.random_cuboid_augmentor(
+                point_cloud, instance_bboxes, [instance_labels, semantic_labels]
+            )
+            instance_labels = per_point_labels[0]
+            semantic_labels = per_point_labels[1]
+
+        point_cloud, choices = random_sampling(
+            point_cloud, self.num_points, return_choices=True
+        )
+        instance_labels = instance_labels[choices]
+        semantic_labels = semantic_labels[choices]
+
+        # semantic labels are not used in 3detr
+        # sem_seg_labels = np.ones_like(semantic_labels) * IGNORE_LABEL
+        # sem_seg_labels = np.ones_like(semantic_labels) * self.IGNORE_LABEL
+
+        # for _c in self.dataset_config.nyu40ids_semseg:
+        #     sem_seg_labels[
+        #         semantic_labels == _c
+        #     ] = self.dataset_config.nyu40id2class_semseg[_c]
+        # for _c in DC.nyu40ids_semseg:
+        #     sem_seg_labels[
+        #         semantic_labels == _c
+        #     ] = DC.nyu40id2class_semseg[_c]
+
+        pcl_color = pcl_color[choices]
+
+        target_bboxes_mask[0 : instance_bboxes.shape[0]] = 1
+        target_bboxes[0 : instance_bboxes.shape[0], :] = instance_bboxes[:, 0:6]
+
+        # ------------------------------- DATA AUGMENTATION ------------------------------
+        if self.augment:
+
+            if np.random.random() > 0.5:
+                # Flipping along the YZ plane
+                point_cloud[:, 0] = -1 * point_cloud[:, 0]
+                target_bboxes[:, 0] = -1 * target_bboxes[:, 0]
+
+            if np.random.random() > 0.5:
+                # Flipping along the XZ plane
+                point_cloud[:, 1] = -1 * point_cloud[:, 1]
+                target_bboxes[:, 1] = -1 * target_bboxes[:, 1]
+
+            # # Rotation along up-axis/Z-axis
+            # rot_angle = (np.random.random() * np.pi / 18) - np.pi / 36  # -5 ~ +5 degree
+            # rot_mat = rotz(rot_angle)
+            # point_cloud[:, 0:3] = np.dot(point_cloud[:, 0:3], np.transpose(rot_mat))
+            # target_bboxes = rotate_aligned_boxes(
+            #     target_bboxes, rot_mat
+            # )
+
+            # Rotation along X-axis
+            rot_angle = (np.random.random()*np.pi/18) - np.pi/36 # -5 ~ +5 degree
+            rot_mat = rotx(rot_angle)
+            point_cloud[:,0:3] = np.dot(point_cloud[:,0:3], np.transpose(rot_mat))
+            target_bboxes = rotate_aligned_boxes_along_axis(target_bboxes, rot_mat, "x")
+
+            # Rotation along Y-axis
+            rot_angle = (np.random.random()*np.pi/18) - np.pi/36 # -5 ~ +5 degree
+            rot_mat = roty(rot_angle)
+            point_cloud[:,0:3] = np.dot(point_cloud[:,0:3], np.transpose(rot_mat))
+            target_bboxes = rotate_aligned_boxes_along_axis(target_bboxes, rot_mat, "y")
+
+            # Rotation along up-axis/Z-axis
+            rot_angle = (np.random.random()*np.pi/18) - np.pi/36 # -5 ~ +5 degree
+            rot_mat = rotz(rot_angle)
+            point_cloud[:,0:3] = np.dot(point_cloud[:,0:3], np.transpose(rot_mat))
+            target_bboxes = rotate_aligned_boxes_along_axis(target_bboxes, rot_mat, "z")
+
+            # Translation
+            point_cloud, target_bboxes = self._translate(point_cloud, target_bboxes)
+
+        raw_sizes = target_bboxes[:, 3:6]
+        point_cloud_dims_min = point_cloud.min(axis=0)[:3]
+        point_cloud_dims_max = point_cloud.max(axis=0)[:3]
+
+        box_centers = target_bboxes.astype(np.float32)[:, 0:3]
+        box_centers_normalized = shift_scale_points(
+            box_centers[None, ...],
+            src_range=[
+                point_cloud_dims_min[None, ...],
+                point_cloud_dims_max[None, ...],
+            ],
+            dst_range=self.center_normalizing_range,
+        )
+        box_centers_normalized = box_centers_normalized.squeeze(0)
+        box_centers_normalized = box_centers_normalized * target_bboxes_mask[..., None]
+        mult_factor = point_cloud_dims_max - point_cloud_dims_min
+        box_sizes_normalized = scale_points(
+            raw_sizes.astype(np.float32)[None, ...],
+            mult_factor=1.0 / mult_factor[None, ...],
+        )
+        box_sizes_normalized = box_sizes_normalized.squeeze(0)
+
+        box_corners = self.dataset_config.box_parametrization_to_corners_np(
+            box_centers[None, ...],
+            raw_sizes.astype(np.float32)[None, ...],
+            raw_angles.astype(np.float32)[None, ...],
+        )
+        box_corners = box_corners.squeeze(0)
+
+        ret_dict = {}
+        ret_dict["point_clouds"] = point_cloud.astype(np.float32)
+        ret_dict["gt_box_corners"] = box_corners.astype(np.float32)
+        ret_dict["gt_box_centers"] = box_centers.astype(np.float32)
+        ret_dict["gt_box_centers_normalized"] = box_centers_normalized.astype(
+            np.float32
+        )
+        ret_dict["gt_angle_class_label"] = angle_classes.astype(np.int64)
+        ret_dict["gt_angle_residual_label"] = angle_residuals.astype(np.float32)
+        target_bboxes_semcls = np.zeros((MAX_NUM_OBJ))
+        
+        
+        
+        target_bboxes_semcls[0 : instance_bboxes.shape[0]] = [
+            self.dataset_config.nyu40id2class[int(x)]
+            # for x in instance_bboxes[:, -1][0 : instance_bboxes.shape[0]]
+            for x in instance_bboxes[:, -2][0 : instance_bboxes.shape[0]]
+        ]
+        
+        ret_dict["gt_box_sem_cls_label"] = target_bboxes_semcls.astype(np.int64)
+        ret_dict["gt_box_present"] = target_bboxes_mask.astype(np.float32)
+        ret_dict["scan_idx"] = np.array(idx).astype(np.int64)
+        ret_dict["pcl_color"] = pcl_color
+        ret_dict["gt_box_sizes"] = raw_sizes.astype(np.float32)
+        ret_dict["gt_box_sizes_normalized"] = box_sizes_normalized.astype(np.float32)
+        ret_dict["gt_box_angles"] = raw_angles.astype(np.float32)
+        ret_dict["point_cloud_dims_min"] = point_cloud_dims_min.astype(np.float32)
+        ret_dict["point_cloud_dims_max"] = point_cloud_dims_max.astype(np.float32)
+        return ret_dict
